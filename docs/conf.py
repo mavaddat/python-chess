@@ -15,7 +15,12 @@ autodoc_type_aliases = {
 }
 
 # Autodoc.
-extensions = ["sphinx.ext.autodoc", "sphinx.ext.viewcode", "sphinx.ext.intersphinx"]
+extensions = [
+    "sphinx.ext.autodoc",
+    "sphinx.ext.viewcode",
+    "sphinx.ext.intersphinx",
+    "sphinxcontrib.jquery"
+]
 autodoc_member_order = "bysource"
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
@@ -29,7 +34,7 @@ master_doc = "index"
 
 # General information about the project.
 project = "python-chess"
-copyright = "2014–2022, Niklas Fiekas"
+copyright = "2014–2024, Niklas Fiekas"
 
 # The version.
 version = chess.__version__
@@ -44,4 +49,4 @@ pygments_style = "sphinx"
 
 # The theme to use for HTML and HTML Help pages. See the documentation for
 # a list of built-in themes.
-html_theme = "default"
+html_theme = "sphinx_rtd_theme"

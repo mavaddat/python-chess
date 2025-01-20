@@ -1,22 +1,7 @@
-# This file is part of the python-chess library.
-# Copyright (C) 2012-2021 Niklas Fiekas <niklas.fiekas@backscattering.de>
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see <http://www.gnu.org/licenses/>.
-
 from __future__ import annotations
 
 import abc
+import dataclasses
 import enum
 import itertools
 import logging
@@ -27,15 +12,15 @@ import chess
 import chess.engine
 import chess.svg
 
-from typing import Any, Callable, Dict, Generic, Iterable, Iterator, List, Mapping, MutableMapping, Set, TextIO, Tuple, Type, TypeVar, Optional, Union
+from typing import Any, Callable, Dict, Generic, Iterable, Iterator, List, Literal, Mapping, MutableMapping, Set, TextIO, Tuple, Type, TypeVar, Optional, Union
 from chess import Color, Square
 
-try:
-    from typing import Literal
-    _TrueLiteral = Literal[True]
-except ImportError:
-    # Before Python 3.8.
-    _TrueLiteral = bool  # type: ignore
+if typing.TYPE_CHECKING:
+    from typing_extensions import Self, override
+else:
+    F = typing.TypeVar("F", bound=Callable[..., Any])
+    def override(fn: F, /) -> F:
+        return fn
 
 
 LOGGER = logging.getLogger(__name__)
@@ -152,6 +137,10 @@ def _condense_affix(infix: str) -> Callable[[typing.Match[str]], str]:
     return repl
 
 
+def _standardize_comments(comment: Union[str, list[str]]) -> list[str]:
+    return [] if not comment else [comment] if isinstance(comment, str) else comment
+
+
 TAG_ROSTER = ["Event", "Site", "Date", "Round", "White", "Black", "Result"]
 
 
@@ -164,6 +153,39 @@ SKIP = SkipType.SKIP
 ResultT = TypeVar("ResultT", covariant=True)
 
 
+class TimeControlType(enum.Enum):
+    UNKNOWN = 0
+    UNLIMITED = 1
+    STANDARD = 2
+    RAPID = 3
+    BLITZ = 4
+    BULLET = 5
+
+
+@dataclasses.dataclass
+class TimeControlPart:
+    moves: int = 0
+    time: int = 0
+    increment: float = 0
+    delay: float = 0
+
+
+@dataclasses.dataclass
+class TimeControl:
+    """
+    PGN TimeControl Parser
+    Spec: http://www.saremba.de/chessgml/standards/pgn/pgn-complete.htm#c9.6
+
+    Not Yet Implemented:
+    - Hourglass/Sandclock ('*' prefix)
+    - Differentiating between Bronstein and Simple Delay (Not part of the PGN Spec)
+      - More Info: https://en.wikipedia.org/wiki/Chess_clock#Timing_methods
+    """
+
+    parts: list[TimeControlPart] = dataclasses.field(default_factory=list)
+    type: TimeControlType = TimeControlType.UNKNOWN
+
+
 class _AcceptFrame:
     def __init__(self, node: ChildNode, *, is_variation: bool = False, sidelines: bool = True):
         self.state = "pre"
@@ -174,37 +196,40 @@ class _AcceptFrame:
 
 
 class GameNode(abc.ABC):
-    parent: Optional[GameNode]
-    """The parent node or ``None`` if this is the root node of the game."""
-
-    move: Optional[chess.Move]
-    """
-    The move leading to this node or ``None`` if this is the root node of the
-    game.
-    """
-
     variations: List[ChildNode]
     """A list of child nodes."""
 
-    comment: str
+    comments: list[str]
     """
     A comment that goes behind the move leading to this node. Comments
     that occur before any moves are assigned to the root node.
     """
 
-    starting_comment: str
+    starting_comments: list[str]
+
     nags: Set[int]
 
-    def __init__(self, *, comment: str = "") -> None:
-        self.parent = None
-        self.move = None
+    def __init__(self, *, comment: Union[str, list[str]] = "") -> None:
         self.variations = []
-        self.comment = comment
+        self.comments = _standardize_comments(comment)
 
         # Deprecated: These should be properties of ChildNode, but need to
         # remain here for backwards compatibility.
-        self.starting_comment = ""
+        self.starting_comments = []
         self.nags = set()
+
+    @property
+    @abc.abstractmethod
+    def parent(self) -> Optional[GameNode]:
+        """The parent node or ``None`` if this is the root node of the game."""
+
+    @property
+    @abc.abstractmethod
+    def move(self) -> Optional[chess.Move]:
+        """
+        The move leading to this node or ``None`` if this is the root node of
+        the game.
+        """
 
     @abc.abstractmethod
     def board(self) -> chess.Board:
@@ -215,6 +240,8 @@ class GameNode(abc.ABC):
         ``Variant``) unless the ``FEN`` header tag is set.
 
         It's a copy, so modifying the board will not alter the game.
+
+        Complexity is `O(n)`.
         """
 
     @abc.abstractmethod
@@ -226,11 +253,15 @@ class GameNode(abc.ABC):
 
         Usually this is equal to the number of parent nodes, but it may be
         more if the game was started from a custom position.
+
+        Complexity is `O(n)`.
         """
 
     def turn(self) -> Color:
         """
         Gets the color to move at this node. See :data:`chess.Board.turn`.
+
+        Complexity is `O(n)`.
         """
         return self.ply() % 2 == 0
 
@@ -241,13 +272,21 @@ class GameNode(abc.ABC):
         return node
 
     def game(self) -> Game:
-        """Gets the root node, i.e., the game."""
+        """
+        Gets the root node, i.e., the game.
+
+        Complexity is `O(n)`.
+        """
         root = self.root()
         assert isinstance(root, Game), "GameNode not rooted in Game"
         return root
 
     def end(self) -> GameNode:
-        """Follows the main variation to the end and returns the last node."""
+        """
+        Follows the main variation to the end and returns the last node.
+
+        Complexity is `O(n)`.
+        """
         node = self
 
         while node.variations:
@@ -256,7 +295,11 @@ class GameNode(abc.ABC):
         return node
 
     def is_end(self) -> bool:
-        """Checks if this node is the last node in the current variation."""
+        """
+        Checks if this node is the last node in the current variation.
+
+        Complexity is `O(1)`.
+        """
         return not self.variations
 
     def starts_variation(self) -> bool:
@@ -267,6 +310,8 @@ class GameNode(abc.ABC):
 
         For example, in ``1. e4 e5 (1... c5 2. Nf3) 2. Nf3``, the node holding
         1... c5 starts a variation.
+
+        Complexity is `O(1)`.
         """
         if not self.parent or not self.parent.variations:
             return False
@@ -274,7 +319,11 @@ class GameNode(abc.ABC):
         return self.parent.variations[0] != self
 
     def is_mainline(self) -> bool:
-        """Checks if the node is in the mainline of the game."""
+        """
+        Checks if the node is in the mainline of the game.
+
+        Complexity is `O(n)`.
+        """
         node = self
 
         while node.parent:
@@ -291,6 +340,8 @@ class GameNode(abc.ABC):
         """
         Checks if this node is the first variation from the point of view of its
         parent. The root node is also in the main variation.
+
+        Complexity is `O(1)`.
         """
         if not self.parent:
             return True
@@ -349,7 +400,7 @@ class GameNode(abc.ABC):
         """Removes a variation."""
         self.variations.remove(self.variation(move))
 
-    def add_variation(self, move: chess.Move, *, comment: str = "", starting_comment: str = "", nags: Iterable[int] = []) -> ChildNode:
+    def add_variation(self, move: chess.Move, *, comment: Union[str, list[str]] = "", starting_comment: Union[str, list[str]] = "", nags: Iterable[int] = []) -> ChildNode:
         """Creates a child node with the given attributes."""
         # Instanciate ChildNode only in this method.
         return ChildNode(self, move, comment=comment, starting_comment=starting_comment, nags=nags)
@@ -367,6 +418,8 @@ class GameNode(abc.ABC):
         """
         Returns the first node of the mainline after this node, or ``None`` if
         this node does not have any children.
+
+        Complexity is `O(1)`.
         """
         return self.variations[0] if self.variations else None
 
@@ -378,7 +431,7 @@ class GameNode(abc.ABC):
         """Returns an iterable over the main moves after this node."""
         return Mainline(self, lambda node: node.move)
 
-    def add_line(self, moves: Iterable[chess.Move], *, comment: str = "", starting_comment: str = "", nags: Iterable[int] = []) -> GameNode:
+    def add_line(self, moves: Iterable[chess.Move], *, comment: Union[str, list[str]] = "", starting_comment: Union[str, list[str]] = "", nags: Iterable[int] = []) -> GameNode:
         """
         Creates a sequence of child nodes for the given list of moves.
         Adds *comment* and *nags* to the last node of the line and returns it.
@@ -391,11 +444,8 @@ class GameNode(abc.ABC):
             starting_comment = ""
 
         # Merge comment and NAGs.
-        if node.comment:
-            node.comment += " " + comment
-        else:
-            node.comment = comment
-
+        comments = _standardize_comments(comment)
+        node.comments.extend(comments)
         node.nags.update(nags)
 
         return node
@@ -404,8 +454,10 @@ class GameNode(abc.ABC):
         """
         Parses the first valid ``[%eval ...]`` annotation in the comment of
         this node, if any.
+
+        Complexity is `O(n)`.
         """
-        match = EVAL_REGEX.search(self.comment)
+        match = EVAL_REGEX.search(" ".join(self.comments))
         if not match:
             return None
 
@@ -420,7 +472,7 @@ class GameNode(abc.ABC):
                 # who has been mated.
                 return chess.engine.PovScore(score, turn)
         else:
-            score = chess.engine.Cp(int(float(match.group("cp")) * 100))
+            score = chess.engine.Cp(round(float(match.group("cp")) * 100))
 
         return chess.engine.PovScore(score if turn else -score, turn)
 
@@ -428,8 +480,10 @@ class GameNode(abc.ABC):
         """
         Parses the first valid ``[%eval ...]`` annotation in the comment of
         this node and returns the corresponding depth, if any.
+
+        Complexity is `O(1)`.
         """
-        match = EVAL_REGEX.search(self.comment)
+        match = EVAL_REGEX.search(" ".join(self.comments))
         return int(match.group("depth")) if match and match.group("depth") else None
 
     def set_eval(self, score: Optional[chess.engine.PovScore], depth: Optional[int] = None) -> None:
@@ -446,12 +500,7 @@ class GameNode(abc.ABC):
             elif score.white().mate():
                 eval = f"[%eval #{score.white().mate()}{depth_suffix}]"
 
-        self.comment, found = EVAL_REGEX.subn(_condense_affix(eval), self.comment, count=1)
-
-        if not found and eval:
-            if self.comment and not self.comment.endswith(" "):
-                self.comment += " "
-            self.comment += eval
+        self._replace_or_add_annotation(eval, EVAL_REGEX)
 
     def arrows(self) -> List[chess.svg.Arrow]:
         """
@@ -461,7 +510,7 @@ class GameNode(abc.ABC):
         Returns a list of :class:`arrows <chess.svg.Arrow>`.
         """
         arrows = []
-        for match in ARROWS_REGEX.finditer(self.comment):
+        for match in ARROWS_REGEX.finditer(" ".join(self.comments)):
             for group in match.group("arrows").split(","):
                 arrows.append(chess.svg.Arrow.from_pgn(group))
 
@@ -483,7 +532,10 @@ class GameNode(abc.ABC):
                 pass
             (csl if arrow.tail == arrow.head else cal).append(arrow.pgn())  # type: ignore
 
-        self.comment = ARROWS_REGEX.sub(_condense_affix(""), self.comment)
+        for index in range(len(self.comments)):
+            self.comments[index] = ARROWS_REGEX.sub(_condense_affix(""), self.comments[index])
+
+        self.comments = list(filter(None, self.comments))
 
         prefix = ""
         if csl:
@@ -491,10 +543,8 @@ class GameNode(abc.ABC):
         if cal:
             prefix += f"[%cal {','.join(cal)}]"
 
-        if prefix and self.comment and not self.comment.startswith(" ") and not self.comment.startswith("\n"):
-            self.comment = prefix + " " + self.comment
-        else:
-            self.comment = prefix + self.comment
+        if prefix:
+            self.comments.insert(0, prefix)
 
     def clock(self) -> Optional[float]:
         """
@@ -504,7 +554,7 @@ class GameNode(abc.ABC):
         Returns the player's remaining time to the next time control after this
         move, in seconds.
         """
-        match = CLOCK_REGEX.search(self.comment)
+        match = CLOCK_REGEX.search(" ".join(self.comments))
         if match is None:
             return None
         return int(match.group("hours")) * 3600 + int(match.group("minutes")) * 60 + float(match.group("seconds"))
@@ -523,12 +573,7 @@ class GameNode(abc.ABC):
             seconds_part = f"{seconds:06.3f}".rstrip("0").rstrip(".")
             clk = f"[%clk {hours:d}:{minutes:02d}:{seconds_part}]"
 
-        self.comment, found = CLOCK_REGEX.subn(_condense_affix(clk), self.comment, count=1)
-
-        if not found and clk:
-            if self.comment and not self.comment.endswith(" ") and not self.comment.endswith("\n"):
-                self.comment += " "
-            self.comment += clk
+        self._replace_or_add_annotation(clk, CLOCK_REGEX)
 
     def emt(self) -> Optional[float]:
         """
@@ -538,7 +583,7 @@ class GameNode(abc.ABC):
         Returns the player's elapsed move time use for the comment of this
         move, in seconds.
         """
-        match = EMT_REGEX.search(self.comment)
+        match = EMT_REGEX.search(" ".join(self.comments))
         if match is None:
             return None
         return int(match.group("hours")) * 3600 + int(match.group("minutes")) * 60 + float(match.group("seconds"))
@@ -557,12 +602,19 @@ class GameNode(abc.ABC):
             seconds_part = f"{seconds:06.3f}".rstrip("0").rstrip(".")
             emt = f"[%emt {hours:d}:{minutes:02d}:{seconds_part}]"
 
-        self.comment, found = EMT_REGEX.subn(_condense_affix(emt), self.comment, count=1)
+        self._replace_or_add_annotation(emt, EMT_REGEX)
 
-        if not found and emt:
-            if self.comment and not self.comment.endswith(" ") and not self.comment.endswith("\n"):
-                self.comment += " "
-            self.comment += emt
+    def _replace_or_add_annotation(self, text: str, regex: re.Pattern[str]) -> None:
+        found = 0
+        for index in range(len(self.comments)):
+            self.comments[index], found = regex.subn(_condense_affix(text), self.comments[index], count=1)
+            if found:
+                break
+
+        self.comments = list(filter(None, self.comments))
+
+        if not found and text:
+            self.comments.append(text)
 
     @abc.abstractmethod
     def accept(self, visitor: BaseVisitor[ResultT]) -> ResultT:
@@ -612,13 +664,7 @@ class ChildNode(GameNode):
     Extends :class:`~chess.pgn.GameNode`.
     """
 
-    parent: GameNode
-    """The parent node."""
-
-    move: chess.Move
-    """The move leading to this node."""
-
-    starting_comment: str
+    starting_comments: list[str]
     """
     A comment for the start of a variation. Only nodes that
     actually start a variation (:func:`~chess.pgn.GameNode.starts_variation()`
@@ -632,15 +678,28 @@ class ChildNode(GameNode):
     node of the game will never have NAGs.
     """
 
-    def __init__(self, parent: GameNode, move: chess.Move, *, comment: str = "", starting_comment: str = "", nags: Iterable[int] = []) -> None:
+    def __init__(self, parent: GameNode, move: chess.Move, *, comment: Union[str, list[str]] = "", starting_comment: Union[str, list[str]] = "", nags: Iterable[int] = []) -> None:
         super().__init__(comment=comment)
-        self.parent = parent
-        self.move = move
+        self._parent = parent
+        self._move = move
         self.parent.variations.append(self)
 
         self.nags.update(nags)
-        self.starting_comment = starting_comment
+        self.starting_comments = _standardize_comments(starting_comment)
 
+    @property
+    @override
+    def parent(self) -> GameNode:
+        """The parent node."""
+        return self._parent
+
+    @property
+    @override
+    def move(self) -> chess.Move:
+        """The move leading to this node."""
+        return self._move
+
+    @override
     def board(self) -> chess.Board:
         stack: List[chess.Move] = []
         node: GameNode = self
@@ -656,6 +715,7 @@ class ChildNode(GameNode):
 
         return board
 
+    @override
     def ply(self) -> int:
         ply = 0
         node: GameNode = self
@@ -670,6 +730,8 @@ class ChildNode(GameNode):
         See :func:`chess.Board.san()`.
 
         Do not call this on the root node.
+
+        Complexity is `O(n)`.
         """
         return self.parent.board().san(self.move)
 
@@ -679,16 +741,23 @@ class ChildNode(GameNode):
         See :func:`chess.Board.uci()`.
 
         Do not call this on the root node.
+
+        Complexity is `O(n)`.
         """
         return self.parent.board().uci(self.move, chess960=chess960)
 
+    @override
     def end(self) -> ChildNode:
-        """Follows the main variation to the end and returns the last node."""
+        """
+        Follows the main variation to the end and returns the last node.
+
+        Complexity is `O(n)`.
+        """
         return typing.cast(ChildNode, super().end())
 
     def _accept_node(self, parent_board: chess.Board, visitor: BaseVisitor[ResultT]) -> None:
-        if self.starting_comment:
-            visitor.visit_comment(self.starting_comment)
+        if self.starting_comments:
+            visitor.visit_comment(self.starting_comments)
 
         visitor.visit_move(parent_board, self.move)
 
@@ -699,8 +768,8 @@ class ChildNode(GameNode):
         for nag in sorted(self.nags):
             visitor.visit_nag(nag)
 
-        if self.comment:
-            visitor.visit_comment(self.comment)
+        if self.comments:
+            visitor.visit_comment(self.comments)
 
     def _accept(self, parent_board: chess.Board, visitor: BaseVisitor[ResultT], *, sidelines: bool = True) -> None:
         stack = [_AcceptFrame(self, sidelines=sidelines)]
@@ -735,6 +804,7 @@ class ChildNode(GameNode):
             else:
                 stack.pop()
 
+    @override
     def accept(self, visitor: BaseVisitor[ResultT]) -> ResultT:
         self._accept(self.parent.board(), visitor, sidelines=False)
         return visitor.result()
@@ -784,14 +854,21 @@ class Game(GameNode):
         self.headers = Headers(headers)
         self.errors = []
 
+    @property
+    @override
+    def parent(self) -> None:
+        return None
+
+    @property
+    @override
+    def move(self) -> None:
+        return None
+
+    @override
     def board(self) -> chess.Board:
         return self.headers.board()
 
-    # TODO: Consider naming.
-    def _interactive_viewer(self) -> Any:
-        from chess._interactive import InteractiveViewer
-        return InteractiveViewer(self)  # type: ignore
-
+    @override
     def ply(self) -> int:
         # Optimization: Parse FEN only for custom starting positions.
         return self.board().ply() if "FEN" in self.headers else 0
@@ -810,11 +887,11 @@ class Game(GameNode):
             fen = setup.fen()
 
         if fen == type(setup).starting_fen:
-            self.headers.pop("SetUp", None)
             self.headers.pop("FEN", None)
+            self.headers.pop("SetUp", None)
         else:
-            self.headers["SetUp"] = "1"
             self.headers["FEN"] = fen
+            self.headers["SetUp"] = "1"
 
         if type(setup).aliases[0] == "Standard" and setup.chess960:
             self.headers["Variant"] = "Chess960"
@@ -824,6 +901,7 @@ class Game(GameNode):
         else:
             self.headers.pop("Variant", None)
 
+    @override
     def accept(self, visitor: BaseVisitor[ResultT]) -> ResultT:
         """
         Traverses the game in PGN order using the given *visitor*. Returns
@@ -836,8 +914,8 @@ class Game(GameNode):
                 board = self.board()
                 visitor.visit_board(board)
 
-                if self.comment:
-                    visitor.visit_comment(self.comment)
+                if self.comments:
+                    visitor.visit_comment(self.comments)
 
                 if self.variations:
                     self.variations[0]._accept(board, visitor)
@@ -846,6 +924,14 @@ class Game(GameNode):
 
         visitor.end_game()
         return visitor.result()
+
+    def time_control(self) -> TimeControl:
+        """
+        Returns the time control of the game. If the game has no time control
+        information, the default time control ('UNKNOWN') is returned.
+        """
+        time_control_header = self.headers.get("TimeControl", "")
+        return parse_time_control(time_control_header)
 
     @classmethod
     def from_board(cls: Type[GameT], board: chess.Board) -> GameT:
@@ -872,12 +958,13 @@ class Game(GameNode):
         return GameBuilder(Game=cls)
 
     def __repr__(self) -> str:
-        return "<{} at {:#x} ({!r} vs. {!r}, {!r}{})>".format(
+        return "<{} at {:#x} ({!r} vs. {!r}, {!r} at {!r}{})>".format(
             type(self).__name__,
             id(self),
             self.headers.get("White", "?"),
             self.headers.get("Black", "?"),
             self.headers.get("Date", "????.??.??"),
+            self.headers.get("Site", "?"),
             f", {len(self.errors)} errors" if self.errors else "")
 
 
@@ -941,10 +1028,7 @@ class Headers(MutableMapping[str, str]):
             self._others[key] = value
 
     def __getitem__(self, key: str) -> str:
-        if key in TAG_ROSTER:
-            return self._tag_roster[key]
-        else:
-            return self._others[key]
+        return self._tag_roster[key] if key in TAG_ROSTER else self._others[key]
 
     def __delitem__(self, key: str) -> None:
         if key in TAG_ROSTER:
@@ -957,15 +1041,15 @@ class Headers(MutableMapping[str, str]):
             if key in self._tag_roster:
                 yield key
 
-        yield from sorted(self._others)
+        yield from self._others
 
     def __len__(self) -> int:
         return len(self._tag_roster) + len(self._others)
 
-    def copy(self: HeadersT) -> HeadersT:
+    def copy(self) -> Self:
         return type(self)(self)
 
-    def __copy__(self: HeadersT) -> HeadersT:
+    def __copy__(self) -> Self:
         return self.copy()
 
     def __repr__(self) -> str:
@@ -1042,21 +1126,12 @@ class BaseVisitor(abc.ABC, Generic[ResultT]):
         """Called after visiting game headers."""
         pass
 
-    def parse_san(self, board: chess.Board, san: str) -> chess.Move:
+    def begin_parse_san(self, board: chess.Board, san: str) -> Optional[SkipType]:
         """
-        When the visitor is used by a parser, this is called to parse a move
-        in standard algebraic notation.
-
-        You can override the default implementation to work around specific
-        quirks of your input format.
-
-        .. deprecated:: 1.1
-            This method is very limited, because it is only called on moves
-            that the parser recognizes in the first place. Instead of adding
-            workarounds here, please report common quirks so that
-            they can be handled for everyone.
+        When the visitor is used by a parser, this is called at the start of
+        each standard algebraic notation detailing a move.
         """
-        return board.parse_san(san)
+        pass
 
     def visit_move(self, board: chess.Board, move: chess.Move) -> None:
         """
@@ -1075,7 +1150,7 @@ class BaseVisitor(abc.ABC, Generic[ResultT]):
         """
         pass
 
-    def visit_comment(self, comment: str) -> None:
+    def visit_comment(self, comment: list[str]) -> None:
         """Called for each comment."""
         pass
 
@@ -1121,57 +1196,68 @@ class GameBuilder(BaseVisitor[GameT]):
     @typing.overload
     def __init__(self: GameBuilder[Game]) -> None: ...
     @typing.overload
-    def __init__(self: GameBuilder[GameT], *, Game: Type[GameT]) -> None: ...
+    def __init__(self, *, Game: Type[GameT]) -> None: ...
     def __init__(self, *, Game: Any = Game) -> None:
         self.Game = Game
 
+    @override
     def begin_game(self) -> None:
         self.game: GameT = self.Game()
 
         self.variation_stack: List[GameNode] = [self.game]
-        self.starting_comment = ""
+        self.starting_comments: list[str] = []
         self.in_variation = False
 
+    @override
     def begin_headers(self) -> Headers:
         return self.game.headers
 
+    @override
     def visit_header(self, tagname: str, tagvalue: str) -> None:
         self.game.headers[tagname] = tagvalue
 
+    @override
     def visit_nag(self, nag: int) -> None:
         self.variation_stack[-1].nags.add(nag)
 
+    @override
     def begin_variation(self) -> None:
         parent = self.variation_stack[-1].parent
         assert parent is not None, "begin_variation called, but root node on top of stack"
         self.variation_stack.append(parent)
         self.in_variation = False
 
+    @override
     def end_variation(self) -> None:
         self.variation_stack.pop()
 
+    @override
     def visit_result(self, result: str) -> None:
         if self.game.headers.get("Result", "*") == "*":
             self.game.headers["Result"] = result
 
-    def visit_comment(self, comment: str) -> None:
+    @override
+    def visit_comment(self, comment: Union[str, list[str]]) -> None:
+        comments = _standardize_comments(comment)
         if self.in_variation or (self.variation_stack[-1].parent is None and self.variation_stack[-1].is_end()):
             # Add as a comment for the current node if in the middle of
             # a variation. Add as a comment for the game if the comment
             # starts before any move.
-            new_comment = [self.variation_stack[-1].comment, comment]
-            self.variation_stack[-1].comment = " ".join(filter(None, new_comment))
+            self.variation_stack[-1].comments.extend(comments)
+            self.variation_stack[-1].comments = list(filter(None, self.variation_stack[-1].comments))
         else:
             # Otherwise, it is a starting comment.
-            new_comment = [self.starting_comment, comment]
-            self.starting_comment = " ".join(filter(None, new_comment))
+            self.starting_comments.extend(comments)
+            self.starting_comments = list(filter(None, self.starting_comments))
 
+    @override
     def visit_move(self, board: chess.Board, move: chess.Move) -> None:
         self.variation_stack[-1] = self.variation_stack[-1].add_variation(move)
-        self.variation_stack[-1].starting_comment = self.starting_comment
-        self.starting_comment = ""
+        self.variation_stack[-1].starting_comments = self.starting_comments
+        self.starting_comments = []
         self.in_variation = True
 
+    @override
     def handle_error(self, error: Exception) -> None:
         """
         Populates :data:`chess.pgn.Game.errors` with encountered errors and
@@ -1202,9 +1288,10 @@ class GameBuilder(BaseVisitor[GameT]):
         >>>
         >>> game = chess.pgn.read_game(pgn, Visitor=MyGameBuilder)
         """
-        LOGGER.exception("error during pgn parsing")
+        LOGGER.error("%s while parsing %r", error, self.game)
         self.game.errors.append(error)
 
+    @override
     def result(self) -> GameT:
         """
         Returns the visited :class:`~chess.pgn.Game()`.
@@ -1218,20 +1305,24 @@ class HeadersBuilder(BaseVisitor[HeadersT]):
     @typing.overload
     def __init__(self: HeadersBuilder[Headers]) -> None: ...
     @typing.overload
-    def __init__(self: HeadersBuilder[HeadersT], *, Headers: Type[Headers]) -> None: ...
+    def __init__(self, *, Headers: Type[HeadersT]) -> None: ...
     def __init__(self, *, Headers: Any = Headers) -> None:
         self.Headers = Headers
 
+    @override
     def begin_headers(self) -> HeadersT:
         self.headers: HeadersT = self.Headers({})
         return self.headers
 
+    @override
     def visit_header(self, tagname: str, tagvalue: str) -> None:
         self.headers[tagname] = tagvalue
 
+    @override
     def end_headers(self) -> SkipType:
         return SKIP
 
+    @override
     def result(self) -> HeadersT:
         return self.headers
 
@@ -1242,37 +1333,46 @@ class BoardBuilder(BaseVisitor[chess.Board]):
     on the move stack.
     """
 
+    @override
     def begin_game(self) -> None:
         self.skip_variation_depth = 0
 
+    @override
     def begin_variation(self) -> SkipType:
         self.skip_variation_depth += 1
         return SKIP
 
+    @override
     def end_variation(self) -> None:
         self.skip_variation_depth = max(self.skip_variation_depth - 1, 0)
 
+    @override
     def visit_board(self, board: chess.Board) -> None:
         if not self.skip_variation_depth:
             self.board = board
 
+    @override
     def result(self) -> chess.Board:
         return self.board
 
 
-class SkipVisitor(BaseVisitor[_TrueLiteral]):
+class SkipVisitor(BaseVisitor[Literal[True]]):
     """Skips a game."""
 
+    @override
     def begin_game(self) -> SkipType:
         return SKIP
 
+    @override
     def end_headers(self) -> SkipType:
         return SKIP
 
+    @override
     def begin_variation(self) -> SkipType:
         return SKIP
 
-    def result(self) -> _TrueLiteral:
+    @override
+    def result(self) -> Literal[True]:
         return True
 
 
@@ -1337,9 +1437,14 @@ class StringExporterMixin:
             self.write_token(") ")
             self.force_movenumber = True
 
-    def visit_comment(self, comment: str) -> None:
+    def visit_comment(self, comment: Union[str, list[str]]) -> None:
         if self.comments and (self.variations or not self.variation_depth):
-            self.write_token("{ " + comment.replace("}", "").strip() + " } ")
+            def pgn_format(comments: list[str]) -> str:
+                edit = map(lambda s: s.replace("{", "").replace("}", ""), comments)
+                return " ".join(f"{{ {comment} }}" for comment in edit if comment)
+
+            comments = _standardize_comments(comment)
+            self.write_token(pgn_format(comments) + " ")
             self.force_movenumber = True
 
     def visit_nag(self, nag: int) -> None:
@@ -1381,6 +1486,7 @@ class StringExporter(StringExporterMixin, BaseVisitor[str]):
     There will be no newline characters at the end of the string.
     """
 
+    @override
     def result(self) -> str:
         if self.current_line:
             return "\n".join(itertools.chain(self.lines, [self.current_line.rstrip()])).rstrip()
@@ -1412,6 +1518,7 @@ class FileExporter(StringExporterMixin, BaseVisitor[int]):
         super().__init__(columns=columns, headers=headers, comments=comments, variations=variations)
         self.handle = handle
 
+    @override
     def begin_game(self) -> None:
         self.written: int = 0
         super().begin_game()
@@ -1427,6 +1534,7 @@ class FileExporter(StringExporterMixin, BaseVisitor[int]):
         self.written += self.handle.write(line.rstrip())
         self.written += self.handle.write("\n")
 
+    @override
     def result(self) -> int:
         return self.written
 
@@ -1498,6 +1606,7 @@ def read_game(handle: TextIO, *, Visitor: Any = GameBuilder) -> Any:
     skipping_game = False
     managed_headers: Optional[Headers] = None
     unmanaged_headers: Optional[Headers] = None
+    board_stack: List[chess.Board] = []
 
     # Ignore leading empty lines and comments.
     line = handle.readline().lstrip("\ufeff")
@@ -1681,14 +1790,15 @@ def read_game(handle: TextIO, *, Visitor: Any = GameBuilder) -> Any:
                 visitor.visit_result(token)
             else:
                 # Parse SAN tokens.
-                try:
-                    move = visitor.parse_san(board_stack[-1], token)
-                except ValueError as error:
-                    visitor.handle_error(error)
-                    skip_variation_depth = 1
-                else:
-                    visitor.visit_move(board_stack[-1], move)
-                    board_stack[-1].push(move)
+                if visitor.begin_parse_san(board_stack[-1], token) is not SKIP:
+                    try:
+                        move = board_stack[-1].parse_san(token)
+                    except ValueError as error:
+                        visitor.handle_error(error)
+                        skip_variation_depth = 1
+                    else:
+                        visitor.visit_move(board_stack[-1], move)
+                        board_stack[-1].push(move)
                 visitor.visit_board(board_stack[-1])
 
         if fresh_line:
@@ -1745,3 +1855,61 @@ def skip_game(handle: TextIO) -> bool:
     Skips a game. Returns ``True`` if a game was found and skipped.
     """
     return bool(read_game(handle, Visitor=SkipVisitor))
+
+
+def parse_time_control(time_control: str) -> TimeControl:
+    tc = TimeControl()
+
+    if not time_control:
+        return tc
+
+    if time_control.startswith("?"):
+        return tc
+
+    if time_control.startswith("-"):
+        tc.type = TimeControlType.UNLIMITED
+        return tc
+
+    def _parse_part(part: str) -> TimeControlPart:
+        tcp = TimeControlPart()
+
+        moves_time, *bonus = part.split("+")
+
+        if bonus:
+            _bonus = bonus[0]
+            if _bonus.lower().endswith("d"):
+                tcp.delay = float(_bonus[:-1])
+            else:
+                tcp.increment = float(_bonus)
+
+        moves, *time = moves_time.split("/")
+        if time:
+            tcp.moves = int(moves)
+            tcp.time = int(time[0])
+        else:
+            tcp.moves = 0
+            tcp.time = int(moves)
+
+        return tcp
+
+    tc.parts = [_parse_part(part) for part in time_control.split(":")]
+
+    if len(tc.parts) > 1:
+        for part in tc.parts[:-1]:
+            if part.moves == 0:
+                raise ValueError("Only last part can be 'sudden death'.")
+
+    # Classification according to https://www.fide.com/FIDE/handbook/LawsOfChess.pdf
+    # (Bullet added)
+    base_time = tc.parts[0].time
+    increment = tc.parts[0].increment
+    if (base_time + 60 * increment) < 3 * 60:
+        tc.type = TimeControlType.BULLET
+    elif (base_time + 60 * increment) < 15 * 60:
+        tc.type = TimeControlType.BLITZ
+    elif (base_time + 60 * increment) < 60 * 60:
+        tc.type = TimeControlType.RAPID
+    else:
+        tc.type = TimeControlType.STANDARD
+
+    return tc
