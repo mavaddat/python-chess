@@ -1720,6 +1720,10 @@ class BoardTestCase(unittest.TestCase):
         self.assertFalse(board.has_legal_en_passant())
         self.assertEqual(len(list(board.legal_moves)), 2)
 
+    def test_multiple_kings(self):
+        board = chess.Board("KKKK1kkk/8/8/8/8/8/8/8 w - - 0 1")
+        self.assertEqual(board.king(chess.WHITE), None)
+
 
 class LegalMoveGeneratorTestCase(unittest.TestCase):
 
